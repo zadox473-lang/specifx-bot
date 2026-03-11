@@ -1,6 +1,6 @@
 # ================= INSTAGRAM ANALYZER PRO =================
 # DEVELOPER: @proxyfxc
-# VERSION: FINAL WITH FLASK (RENDER READY)
+# VERSION: FIXED FOR RENDER
 # ==========================================================
 
 import os
@@ -11,6 +11,8 @@ import requests
 from io import BytesIO
 from datetime import datetime
 import threading
+import time
+import sys
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -28,41 +30,87 @@ except:
     pass
 
 # ================= CONFIG FROM ENV =================
+print("🔍 Checking environment variables...")
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+ADMIN_ID_STR = os.environ.get("ADMIN_ID")
 API_URL = os.environ.get("API_URL", "https://tg-user-id-to-number-4erk.onrender.com/api/insta={}?api_key=PAID_INSTA_SELL187")
 PORT = int(os.environ.get("PORT", 8080))
 
-if not BOT_TOKEN or not ADMIN_ID:
-    raise ValueError("❌ BOT_TOKEN and ADMIN_ID must be set in environment variables!")
+print(f"BOT_TOKEN set: {'✅' if BOT_TOKEN else '❌'}")
+print(f"ADMIN_ID set: {'✅' if ADMIN_ID_STR else '❌'}")
+
+if not BOT_TOKEN:
+    print("❌ CRITICAL: BOT_TOKEN not set!")
+    BOT_TOKEN = "DUMMY_TOKEN"  # Just for Flask to start
+
+if not ADMIN_ID_STR:
+    print("❌ CRITICAL: ADMIN_ID not set!")
+    ADMIN_ID = 0
+else:
+    try:
+        ADMIN_ID = int(ADMIN_ID_STR)
+        print(f"✅ ADMIN_ID: {ADMIN_ID}")
+    except ValueError:
+        print(f"❌ ADMIN_ID must be number! Got: {ADMIN_ID_STR}")
+        ADMIN_ID = 0
 
 FORCE_CHANNELS = ["@midnight_xaura", "@proxydominates"]
 DEVELOPER = "@proxyfxc"
+
+print(f"📊 Force channels: {FORCE_CHANNELS}")
+print(f"💻 Developer: {DEVELOPER}")
 
 # ================= FLASK APP =================
 app = Flask(__name__)
 
 @app.route('/')
 def home():
+    bot_status = "✅ RUNNING" if 'bot_app' in globals() and bot_app else "❌ NOT STARTED"
     return f"""
     <html>
-        <head><title>Instagram Analyzer Pro</title></head>
-        <body style="font-family: Arial; text-align: center; padding: 50px;">
-            <h1>🔥 INSTAGRAM ANALYZER PRO 🔥</h1>
-            <h3>BY {DEVELOPER}</h3>
-            <p>Bot is running!</p>
-            <p>🤖 Status: Active</p>
-            <p>👑 Admin ID: {ADMIN_ID}</p>
-            <p>📊 Force Channels: {FORCE_CHANNELS}</p>
-            <hr>
-            <p>© 2024 {DEVELOPER} - All Rights Reserved</p>
+        <head>
+            <title>Instagram Analyzer Pro</title>
+            <style>
+                body {{ font-family: Arial; text-align: center; padding: 50px; background: #1a1a1a; color: white; }}
+                .container {{ max-width: 600px; margin: 0 auto; }}
+                .status {{ padding: 20px; border-radius: 10px; margin: 20px 0; }}
+                .online {{ background: #00ff8844; border: 1px solid #00ff88; }}
+                .offline {{ background: #ff444444; border: 1px solid #ff4444; }}
+                .credit {{ color: #00ff88; font-weight: bold; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>🔥 INSTAGRAM ANALYZER PRO 🔥</h1>
+                <h2 class="credit">BY {DEVELOPER}</h2>
+                
+                <div class="status {'online' if 'bot_app' in globals() and bot_app else 'offline'}">
+                    <h3>Bot Status: {bot_status}</h3>
+                    <p>🤖 Telegram Bot: {'✅ Active' if 'bot_app' in globals() and bot_app else '❌ Inactive'}</p>
+                    <p>🌐 Web Server: ✅ Active</p>
+                </div>
+                
+                <div class="status">
+                    <h3>Configuration:</h3>
+                    <p>👑 Admin ID: {ADMIN_ID}</p>
+                    <p>📊 Force Channels: {', '.join(FORCE_CHANNELS)}</p>
+                </div>
+                
+                <hr>
+                <p>© 2024 {DEVELOPER} - All Rights Reserved</p>
+            </div>
         </body>
     </html>
     """
 
 @app.route('/health')
 def health():
-    return {"status": "ok", "developer": DEVELOPER}, 200
+    return {
+        "status": "ok", 
+        "developer": DEVELOPER,
+        "bot_running": 'bot_app' in globals() and bot_app is not None
+    }, 200
 
 # ================= DATABASE =================
 db = sqlite3.connect("users.db", check_same_thread=False)
@@ -355,30 +403,54 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"✅ SENT: {sent}\n❌ FAILED: {failed}")
 
-# ================= RUN BOT IN THREAD =================
+# ================= RUN BOT =================
+bot_app = None
+
 def run_bot():
-    app_bot = Application.builder().token(BOT_TOKEN).build()
-    
-    app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(CommandHandler("users", users_cmd))
-    app_bot.add_handler(CommandHandler("broadcast", broadcast_cmd))
-    app_bot.add_handler(CallbackQueryHandler(callbacks))
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_username))
-    
-    print("✅ BOT IS RUNNING!")
-    print(f"👑 ADMIN ID: {ADMIN_ID}")
-    print(f"📊 FORCE CHANNELS: {FORCE_CHANNELS}")
-    print(f"💻 DEVELOPER: {DEVELOPER}")
-    print("=" * 40)
-    
-    app_bot.run_polling()
+    global bot_app
+    try:
+        print("🚀 Starting Telegram bot...")
+        
+        if not BOT_TOKEN or BOT_TOKEN == "DUMMY_TOKEN":
+            print("❌ Cannot start bot: Invalid BOT_TOKEN")
+            return
+            
+        bot_app = Application.builder().token(BOT_TOKEN).build()
+        
+        bot_app.add_handler(CommandHandler("start", start))
+        bot_app.add_handler(CommandHandler("users", users_cmd))
+        bot_app.add_handler(CommandHandler("broadcast", broadcast_cmd))
+        bot_app.add_handler(CallbackQueryHandler(callbacks))
+        bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_username))
+        
+        print("✅ Bot handlers registered!")
+        print(f"👑 ADMIN ID: {ADMIN_ID}")
+        print(f"📊 FORCE CHANNELS: {FORCE_CHANNELS}")
+        print(f"💻 DEVELOPER: {DEVELOPER}")
+        print("=" * 40)
+        print("✅ Bot is polling for updates...")
+        
+        bot_app.run_polling()
+    except Exception as e:
+        print(f"❌ Bot error: {e}")
+        bot_app = None
 
 # ================= MAIN =================
 if __name__ == "__main__":
-    # Start bot in background thread
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
+    # Print startup banner
+    print("╔════════════════════════════════╗")
+    print("║    INSTAGRAM ANALYZER PRO     ║")
+    print("║         BY @proxyfxc           ║")
+    print("╚════════════════════════════════╝")
+    
+    # Start bot in background thread only if token is valid
+    if BOT_TOKEN and BOT_TOKEN != "DUMMY_TOKEN":
+        bot_thread = threading.Thread(target=run_bot, daemon=True)
+        bot_thread.start()
+        print("✅ Bot thread started")
+    else:
+        print("❌ Bot not started: Invalid token")
     
     # Run Flask app
-    print(f"✅ FLASK APP RUNNING ON PORT {PORT}")
+    print(f"✅ Flask app starting on port {PORT}")
     app.run(host="0.0.0.0", port=PORT)
