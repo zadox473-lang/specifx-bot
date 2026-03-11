@@ -8,6 +8,7 @@ from io import BytesIO
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 import threading
+import time
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -26,13 +27,11 @@ FORCE_CHANNELS = [
     "@proxydominates"
 ]
 
-# Creator Credit
+# SIRF AAPKA CREDIT - @proxyfxc
 CREATOR = "@proxyfxc"
-DEVELOPER = "@E_commerceseller"
+BOT_NAME = "Instagram Analyzer Pro"
 
-# Credit System
-DAILY_CREDITS = 10
-
+DAILY_CREDITS =
 # ================= FLASK APP =================
 app = Flask(__name__)
 
@@ -40,9 +39,8 @@ app = Flask(__name__)
 def home():
     return jsonify({
         "status": "active",
-        "bot": "Instagram Analyzer Pro",
+        "bot": BOT_NAME,
         "creator": CREATOR,
-        "developer": DEVELOPER,
         "endpoints": {
             "/health": "Health check",
             "/stats": "Bot statistics"
@@ -56,14 +54,16 @@ def health():
 @app.route('/stats')
 def stats():
     try:
-        cur.execute("SELECT COUNT(*) FROM users")
-        total_users = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM users WHERE credits > 0")
-        active_users = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM users WHERE approved = 1")
+        approved_users = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM users WHERE approved = 0 AND blocked = 0")
+        pending_users = cur.fetchone()[0]
+        
         return jsonify({
-            "total_users": total_users,
-            "active_users": active_users,
+            "bot": BOT_NAME,
             "creator": CREATOR,
+            "approved_users": approved_users,
+            "pending_approval": pending_users,
             "status": "running"
         })
     except:
@@ -77,31 +77,78 @@ def run_flask():
 db = sqlite3.connect("users.db", check_same_thread=False)
 cur = db.cursor()
 
-# Create tables
+# Create tables with approval system
 cur.execute("""
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
+    username TEXT,
     credits INTEGER DEFAULT 10,
     last_reset DATE DEFAULT CURRENT_DATE,
     total_searches INTEGER DEFAULT 0,
-    joined_date DATE DEFAULT CURRENT_DATE
+    joined_date DATE DEFAULT CURRENT_DATE,
+    approved INTEGER DEFAULT 0,
+    blocked INTEGER DEFAULT 0,
+    approved_by INTEGER,
+    approved_date DATE
 )
 """)
 db.commit()
 
-def save_user(uid):
+def save_user(uid, username=None):
     cur.execute("""
-        INSERT OR IGNORE INTO users (id, credits, last_reset, joined_date) 
-        VALUES (?, ?, DATE('now'), DATE('now'))
-    """, (uid, DAILY_CREDITS))
+        INSERT OR IGNORE INTO users (id, username, credits, last_reset, joined_date, approved) 
+        VALUES (?, ?, ?, DATE('now'), DATE('now'), 0)
+    """, (uid, username, DAILY_CREDITS))
     db.commit()
 
+def approve_user(uid, admin_id):
+    cur.execute("""
+        UPDATE users 
+        SET approved = 1, approved_by = ?, approved_date = DATE('now'), blocked = 0 
+        WHERE id = ?
+    """, (admin_id, uid))
+    db.commit()
+
+def block_user(uid):
+    cur.execute("UPDATE users SET blocked = 1, approved = 0 WHERE id = ?", (uid,))
+    db.commit()
+
+def unblock_user(uid):
+    cur.execute("UPDATE users SET blocked = 0, approved = 0 WHERE id = ?", (uid,))
+    db.commit()
+
+def is_approved(uid):
+    if uid == ADMIN_ID:
+        return True
+    cur.execute("SELECT approved, blocked FROM users WHERE id = ?", (uid,))
+    result = cur.fetchone()
+    if result:
+        return result[0] == 1 and result[1] == 0
+    return False
+
+def get_user_status(uid):
+    cur.execute("SELECT approved, blocked FROM users WHERE id = ?", (uid,))
+    return cur.fetchone()
+
+def get_pending_users():
+    cur.execute("SELECT id, username, joined_date FROM users WHERE approved = 0 AND blocked = 0")
+    return cur.fetchall()
+
+def get_approved_users():
+    cur.execute("SELECT id, username, credits FROM users WHERE approved = 1 AND blocked = 0")
+    return cur.fetchall()
+
+def get_blocked_users():
+    cur.execute("SELECT id, username FROM users WHERE blocked = 1")
+    return cur.fetchall()
+
 def get_user_credits(uid):
+    if not is_approved(uid):
+        return 0
     cur.execute("SELECT credits, last_reset FROM users WHERE id = ?", (uid,))
     result = cur.fetchone()
     if result:
         credits, last_reset = result
-        # Reset credits if new day
         if last_reset != datetime.now().strftime("%Y-%m-%d"):
             credits = DAILY_CREDITS
             cur.execute("UPDATE users SET credits = ?, last_reset = DATE('now') WHERE id = ?", (credits, uid))
@@ -110,6 +157,10 @@ def get_user_credits(uid):
     return 0
 
 def deduct_credit(uid):
+    if not is_approved(uid):
+        return False
+    if uid == ADMIN_ID:
+        return True
     credits = get_user_credits(uid)
     if credits > 0:
         cur.execute("""
@@ -134,7 +185,7 @@ def get_user_stats(uid):
     return cur.fetchone()
 
 def get_all_users():
-    cur.execute("SELECT id FROM users")
+    cur.execute("SELECT id FROM users WHERE approved = 1 AND blocked = 0")
     return [row[0] for row in cur.fetchall()]
 
 # ================= FORCE JOIN =================
@@ -154,12 +205,18 @@ def join_kb():
     return InlineKeyboardMarkup(btns)
 
 # ================= UI =================
-def menu_kb():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔍 Deep Analysis", callback_data="deep")],
-        [InlineKeyboardButton("💰 My Credits", callback_data="credits")],
-        [InlineKeyboardButton("❓ Help", callback_data="help")]
-    ])
+def menu_kb(uid):
+    if uid == ADMIN_ID or (get_user_status(uid) and get_user_status(uid)[0] == 1):
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔍 Deep Analysis", callback_data="deep")],
+            [InlineKeyboardButton("💰 My Credits", callback_data="credits")],
+            [InlineKeyboardButton("❓ Help", callback_data="help")]
+        ])
+    else:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("❓ Help", callback_data="help")],
+            [InlineKeyboardButton("📢 Request Approval", callback_data="request_approval")]
+        ])
 
 def after_kb(username):
     return InlineKeyboardMarkup([
@@ -171,7 +228,9 @@ def after_kb(username):
 def admin_kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Bot Stats", callback_data="admin_stats")],
-        [InlineKeyboardButton("👥 Users List", callback_data="admin_users")],
+        [InlineKeyboardButton("👥 Pending Users", callback_data="admin_pending")],
+        [InlineKeyboardButton("✅ Approved Users", callback_data="admin_approved")],
+        [InlineKeyboardButton("🔨 Blocked Users", callback_data="admin_blocked")],
         [InlineKeyboardButton("💰 Add Credits", callback_data="admin_add_credits")],
         [InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast")],
         [InlineKeyboardButton("⬅️ Menu", callback_data="menu")]
@@ -182,36 +241,35 @@ def fetch_profile(username):
     url = API_URL.format(username)
     
     try:
+        print(f"\n{'='*50}")
+        print(f"🔍 FETCHING: @{username}")
+        
         r = requests.get(url, timeout=20)
+        
         if r.status_code != 200:
-            print(f"HTTP Error: {r.status_code}")
+            print(f"❌ HTTP Error: {r.status_code}")
             return None
         
         data = r.json()
-        print(f"API Response for @{username}: {data}")
         
-        if data.get("status") != "ok":
-            print(f"API Error: {data.get('message', 'Unknown error')}")
-            return None
+        # Check if API returned success
+        if data.get("status") == "ok" or data.get("success") == True:
+            profile = data.get("profile") or data.get("data") or data.get("user")
+            if profile:
+                return {
+                    "status": "ok",
+                    "collected_at": data.get("collected_at", datetime.now().strftime("%Y-%m-%dT%H:%M:%S+00:00")),
+                    "profile": profile
+                }
         
-        profile = data.get("profile", {})
-        if not profile:
-            print("No profile data found")
-            return None
-        
-        return {
-            "status": "ok",
-            "collected_at": data.get("collected_at", ""),
-            "developer": DEVELOPER,
-            "profile": profile
-        }
+        print(f"❌ API Error: {data.get('message', 'Unknown error')}")
+        return None
         
     except Exception as e:
-        print(f"API Error: {e}")
+        print(f"🔥 API Error: {e}")
         return None
 
 def download_image(url):
-    """Download image from URL"""
     try:
         r = requests.get(url, timeout=15)
         bio = BytesIO(r.content)
@@ -270,8 +328,6 @@ def calc_risk(profile_data):
 
 # ================ FORMAT REPORT =================
 def format_report(data, risk, issues):
-    """API response ko stylish box format mein karo - exactly like screenshot"""
-    
     profile = data.get("profile", {})
     collected_at = data.get("collected_at", datetime.now().strftime("%Y-%m-%dT%H:%M:%S+00:00"))
     
@@ -288,7 +344,6 @@ def format_report(data, risk, issues):
     professional = "✅ YES" if profile.get("is_professional_account", False) else "❌ NO"
     external_url = profile.get("external_url", "None")
     
-    # Format exactly like screenshot
     report = f"""
 ╔══════════════════════════════════════╗
 ║     🔥 INSTAGRAM ANALYZER PRO 🔥     ║
@@ -340,7 +395,7 @@ def format_report(data, risk, issues):
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ⏱️ COLLECTED: {collected_at}
-💻 DEVELOPER: {DEVELOPER}
+👑 CREATOR: {CREATOR}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
     
     return report
@@ -348,23 +403,53 @@ def format_report(data, risk, issues):
 # ================= HANDLERS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    save_user(uid)
-
+    username = update.effective_user.username
+    save_user(uid, username)
+    
     if not await is_joined(context.bot, uid):
         await update.message.reply_text(
             "❌ Please join all channels first.",
             reply_markup=join_kb()
         )
         return
-
-    credits = get_user_credits(uid)
-    await update.message.reply_text(
-        f"✨ Welcome to Insta Analyzer Pro ✨\n"
-        f"👤 Created by {CREATOR}\n\n"
-        f"💰 Your Credits: {credits}/{DAILY_CREDITS}\n"
-        f"Send any Instagram username to analyze!",
-        reply_markup=menu_kb()
-    )
+    
+    if uid == ADMIN_ID:
+        await update.message.reply_text(
+            f"👑 Admin Access Granted\n\n"
+            f"✨ Welcome to {BOT_NAME} ✨\n"
+            f"Created by {CREATOR}\n\n"
+            f"💰 Unlimited Credits\n"
+            f"Use /admin for panel",
+            reply_markup=menu_kb(uid)
+        )
+        return
+    
+    status = get_user_status(uid)
+    
+    if status and status[1] == 1:
+        await update.message.reply_text(
+            "❌ You have been blocked.\nContact admin."
+        )
+        return
+    
+    if status and status[0] == 1:
+        credits = get_user_credits(uid)
+        await update.message.reply_text(
+            f"✨ Welcome to {BOT_NAME} ✨\n"
+            f"Created by {CREATOR}\n\n"
+            f"✅ Account Approved!\n"
+            f"💰 Credits: {credits}/{DAILY_CREDITS}\n"
+            f"Send Instagram username to analyze!",
+            reply_markup=menu_kb(uid)
+        )
+    else:
+        await update.message.reply_text(
+            f"⏳ Pending Approval\n\n"
+            f"Bot: {BOT_NAME}\n"
+            f"Creator: {CREATOR}\n\n"
+            f"Click 'Request Approval' below",
+            reply_markup=menu_kb(uid)
+        )
 
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -373,41 +458,60 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if q.data == "check":
         if await is_joined(context.bot, uid):
-            await q.message.edit_text("✅ Access granted!", reply_markup=menu_kb())
+            await q.message.edit_text("✅ Access granted!", reply_markup=menu_kb(uid))
         else:
             await q.message.reply_text("❌ Please join all channels first", reply_markup=join_kb())
 
     elif q.data == "menu":
-        credits = get_user_credits(uid)
+        await start(update, context)
+
+    elif q.data == "request_approval":
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"🔔 Approval Request\n\n"
+            f"User: {uid}\n"
+            f"Username: @{q.from_user.username}\n"
+            f"Name: {q.from_user.full_name}\n\n"
+            f"/approve {uid}\n/block {uid}"
+        )
         await q.message.edit_text(
-            f"🏠 Main Menu\n💰 Credits: {credits}/{DAILY_CREDITS}",
-            reply_markup=menu_kb()
+            f"✅ Request Sent to {CREATOR}\nYou'll be notified when approved.",
+            reply_markup=menu_kb(uid)
         )
 
     elif q.data == "credits":
-        credits, total, joined = get_user_stats(uid)
-        await q.message.edit_text(
-            f"💰 YOUR CREDITS\n\n"
-            f"• Available: {credits}/{DAILY_CREDITS}\n"
-            f"• Total Searches: {total}\n"
-            f"• Member Since: {joined}\n\n"
-            f"Credits reset daily at 00:00 UTC",
-            reply_markup=menu_kb()
-        )
+        if not is_approved(uid):
+            await q.message.edit_text("❌ Not approved yet!", reply_markup=menu_kb(uid))
+            return
+        stats = get_user_stats(uid)
+        if stats:
+            credits, total, joined = stats
+            await q.message.edit_text(
+                f"💰 YOUR CREDITS\n\n"
+                f"• Available: {credits}/{DAILY_CREDITS}\n"
+                f"• Total Searches: {total}\n"
+                f"• Member Since: {joined}\n\n"
+                f"Credits reset daily",
+                reply_markup=menu_kb(uid)
+            )
 
     elif q.data == "deep":
+        if not is_approved(uid):
+            await q.message.edit_text("❌ Not approved yet!", reply_markup=menu_kb(uid))
+            return
+        
         credits = get_user_credits(uid)
-        if credits <= 0:
+        if credits <= 0 and uid != ADMIN_ID:
             await q.message.edit_text(
-                "❌ No credits left!\n"
-                "Wait for daily reset or contact admin.",
-                reply_markup=menu_kb()
+                "❌ No credits left!",
+                reply_markup=menu_kb(uid)
             )
             return
+        
         context.user_data["wait"] = True
         await q.message.reply_text(
-            f"👤 Send Instagram username (with or without @)\n"
-            f"💰 Credits left: {credits-1}"
+            f"👤 Send Instagram username\n"
+            f"💰 Credits left: {credits-1 if uid != ADMIN_ID else '∞'}"
         )
 
     elif q.data.startswith("report|"):
@@ -421,95 +525,83 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         risk, issues = calc_risk(data)
         report = format_report(data, risk, issues)
-        
         await q.message.reply_text(report, reply_markup=after_kb(username))
 
     elif q.data == "help":
-        await q.message.edit_text(
-            "🔍 *HOW TO USE*\n"
-            "• Click 'Deep Analysis'\n"
-            "• Send Instagram username\n"
-            "• Get detailed report\n\n"
-            "💰 *CREDIT SYSTEM*\n"
-            f"• {DAILY_CREDITS} free credits daily\n"
-            "• Resets at midnight UTC\n"
-            "• Admin can add more\n\n"
-            "👑 *CREATOR*\n"
-            f"• {CREATOR}\n"
-            f"• Developer: {DEVELOPER}",
-            parse_mode='Markdown',
-            reply_markup=menu_kb()
-        )
+        text = f"🔍 HELP\n\nBot: {BOT_NAME}\nCreator: {CREATOR}\n\n"
+        if is_approved(uid):
+            text += "• Deep Analysis: Analyze profiles\n• Credits: Check balance\n• Daily reset: 00:00 UTC"
+        else:
+            text += "• Request approval to use bot"
+        await q.message.edit_text(text, reply_markup=menu_kb(uid))
 
     # Admin callbacks
     elif q.data == "admin_stats" and uid == ADMIN_ID:
-        total = total_users()
-        active = sum(1 for u in get_all_users() if get_user_credits(u) > 0)
+        pending = len(get_pending_users())
+        approved = len(get_approved_users())
+        blocked = len(get_blocked_users())
         await q.message.edit_text(
-            f"📊 BOT STATISTICS\n\n"
-            f"• Total Users: {total}\n"
-            f"• Active Today: {active}\n"
-            f"• Daily Credits: {DAILY_CREDITS}\n"
-            f"• Creator: {CREATOR}\n",
+            f"📊 STATISTICS\n\n"
+            f"• Pending: {pending}\n"
+            f"• Approved: {approved}\n"
+            f"• Blocked: {blocked}\n"
+            f"• Creator: {CREATOR}",
             reply_markup=admin_kb()
         )
 
-    elif q.data == "admin_users" and uid == ADMIN_ID:
-        users = get_all_users()[:10]  # Show first 10
-        text = "👥 RECENT USERS\n\n"
-        for u in users:
-            cred = get_user_credits(u)
-            text += f"• {u}: {cred} credits\n"
-        await q.message.edit_text(text, reply_markup=admin_kb())
+    elif q.data == "admin_pending" and uid == ADMIN_ID:
+        pending = get_pending_users()
+        if not pending:
+            await q.message.edit_text("No pending users!", reply_markup=admin_kb())
+            return
+        text = "⏳ PENDING USERS\n\n"
+        for uid, user, joined in pending:
+            text += f"• {uid} (@{user or 'N/A'})\n/approve {uid}\n\n"
+        await q.message.edit_text(text[:4000], reply_markup=admin_kb())
 
 async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     
     if not context.user_data.get("wait"):
         return
-
-    # Check credits
-    credits = get_user_credits(uid)
-    if credits <= 0 and uid != ADMIN_ID:  # Admin has unlimited
-        await update.message.reply_text(
-            "❌ No credits left!\n"
-            "Wait for daily reset or contact admin.",
-            reply_markup=menu_kb()
-        )
+    
+    if not is_approved(uid):
+        await update.message.reply_text("❌ Not approved yet!")
         context.user_data["wait"] = False
         return
+
+    if uid != ADMIN_ID:
+        credits = get_user_credits(uid)
+        if credits <= 0:
+            await update.message.reply_text("❌ No credits left!")
+            context.user_data["wait"] = False
+            return
 
     context.user_data["wait"] = False
     username = update.message.text.replace("@", "").strip()
     
     if not username:
-        await update.message.reply_text("❌ Please send a valid username")
+        await update.message.reply_text("❌ Send valid username")
         return
     
-    # Deduct credit (except admin)
     if uid != ADMIN_ID:
         deduct_credit(uid)
     
-    status_msg = await update.message.reply_text("🔄 Analyzing Instagram profile...")
+    status_msg = await update.message.reply_text("🔄 Analyzing...")
     
-    # Fetch profile data
     data = fetch_profile(username)
     
     if not data:
         await status_msg.edit_text("❌ Profile not found or API error")
         return
     
-    # Calculate risk
     risk, issues = calc_risk(data)
     
-    # Get profile pic URL
     profile = data.get("profile", {})
     pic_url = profile.get("profile_pic_url_hd")
     
-    # Format exactly like screenshot
     caption = f"ANALYSIS COMPLETE\n@{username}\nRisk: {risk}%"
     
-    # Try to send with profile pic
     if pic_url:
         try:
             pic_data = download_image(pic_url)
@@ -521,96 +613,98 @@ async def handle_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 await status_msg.delete()
                 return
-        except Exception as e:
-            print(f"Photo error: {e}")
+        except:
+            pass
     
-    # Send text-only response
     await status_msg.edit_text(caption, reply_markup=after_kb(username))
 
 # ================= ADMIN COMMANDS =================
-async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Unauthorized")
         return
-    await update.message.reply_text(f"👥 Total users: {total_users()}")
+    try:
+        uid = int(context.args[0])
+        approve_user(uid, ADMIN_ID)
+        await update.message.reply_text(f"✅ Approved {uid}")
+        await context.bot.send_message(uid, f"✅ Approved by {CREATOR}\n/start to use bot")
+    except:
+        await update.message.reply_text("Usage: /approve user_id")
 
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def block(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Unauthorized")
         return
+    try:
+        uid = int(context.args[0])
+        block_user(uid)
+        await update.message.reply_text(f"🔨 Blocked {uid}")
+    except:
+        await update.message.reply_text("Usage: /block user_id")
 
-    if not context.args:
-        await update.message.reply_text("Usage: /broadcast message")
+async def unblock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
         return
-
-    msg = " ".join(context.args)
-    users = get_all_users()
-    sent = 0
-    failed = 0
-
-    for uid in users:
-        try:
-            await context.bot.send_message(uid, msg)
-            sent += 1
-        except:
-            failed += 1
-
-    await update.message.reply_text(f"✅ Broadcast sent to {sent} users\n❌ Failed: {failed}")
+    try:
+        uid = int(context.args[0])
+        unblock_user(uid)
+        await update.message.reply_text(f"✅ Unblocked {uid}")
+    except:
+        await update.message.reply_text("Usage: /unblock user_id")
 
 async def add_credits_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Unauthorized")
         return
-
     try:
-        user_id = int(context.args[0])
+        uid = int(context.args[0])
         amount = int(context.args[1])
-        add_credits(user_id, amount)
-        await update.message.reply_text(f"✅ Added {amount} credits to {user_id}")
+        add_credits(uid, amount)
+        await update.message.reply_text(f"✅ Added {amount} credits to {uid}")
     except:
         await update.message.reply_text("Usage: /addcredits user_id amount")
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Unauthorized")
         return
-    await update.message.reply_text("👑 Admin Panel", reply_markup=admin_kb())
+    await update.message.reply_text(f"👑 Admin Panel\nCreator: {CREATOR}", reply_markup=admin_kb())
 
-async def my_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    credits, total, joined = get_user_stats(uid)
-    await update.message.reply_text(
-        f"📊 YOUR STATS\n\n"
-        f"• Credits: {credits}/{DAILY_CREDITS}\n"
-        f"• Searches: {total}\n"
-        f"• Joined: {joined}\n"
-        f"• Creator: {CREATOR}"
-    )
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /broadcast message")
+        return
+    msg = " ".join(context.args)
+    users = get_all_users()
+    sent = 0
+    for uid in users:
+        try:
+            await context.bot.send_message(uid, msg)
+            sent += 1
+        except:
+            pass
+    await update.message.reply_text(f"✅ Sent to {sent} users")
 
 # ================= RUN =================
 def main():
-    # Start Flask in background
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
-    # Start Telegram bot
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Add handlers
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("users", users_cmd))
-    app.add_handler(CommandHandler("broadcast", broadcast))
+    app.add_handler(CommandHandler("approve", approve))
+    app.add_handler(CommandHandler("block", block))
+    app.add_handler(CommandHandler("unblock", unblock))
     app.add_handler(CommandHandler("addcredits", add_credits_cmd))
     app.add_handler(CommandHandler("admin", admin_panel))
-    app.add_handler(CommandHandler("stats", my_stats))
+    app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CallbackQueryHandler(callbacks))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_username))
 
-    print(f"✅ Bot started! Press Ctrl+C to stop")
-    print(f"👑 Admin ID: {ADMIN_ID}")
-    print(f"👤 Creator: {CREATOR}")
-    print(f"💰 Daily credits: {DAILY_CREDITS}")
-    print(f"🌐 Flask running on port {os.environ.get('PORT', 8080)}")
+    print(f"\n{'='*50}")
+    print(f"✅ BOT STARTED")
+    print(f"👑 CREATOR: {CREATOR}")
+    print(f"💰 DAILY CREDITS: {DAILY_CREDITS}")
+    print(f"{'='*50}\n")
     
     app.run_polling()
 
